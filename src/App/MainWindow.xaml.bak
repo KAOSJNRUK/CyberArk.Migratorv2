@@ -1,0 +1,75 @@
+﻿<Window x:Class="CyberArk.Migrator.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="CyberArk Migrator" Height="500" Width="900"
+        Background="#F5F8FA">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <DockPanel Grid.Row="0" Background="#004B8D" Height="60">
+            <Image Source="Resources/CyberArkLogo.png"
+                   Height="40" Margin="10,10,20,10"/>
+            <TextBlock Text="CyberArk Migrator"
+                       VerticalAlignment="Center"
+                       Foreground="White"
+                       FontSize="22"
+                       FontWeight="Bold"/>
+        </DockPanel>
+
+        <!-- Body -->
+        <Grid Grid.Row="1" Margin="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="280"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Controls Panel -->
+            <StackPanel Grid.Column="0" Margin="0,0,10,0">
+
+                <!-- Features -->
+                <GroupBox Header="Features" Margin="0,0,0,10">
+                    <StackPanel>
+                        <CheckBox Name="chkDelinea" Content="Use Delinea"/>
+                        <CheckBox Name="chkBeyondTrust" Content="Use BeyondTrust"/>
+                        <CheckBox Name="chkOsirium" Content="Use Osirium"/>
+                        <Separator/>
+                        <CheckBox Name="chkPCloud" Content="Import to Privilege Cloud"/>
+                        <CheckBox Name="chkSelfHosted" Content="Import to Self-Hosted"/>
+                        <CheckBox Name="chkDryRun" Content="Dry Run (no changes)" IsChecked="True"/>
+                    </StackPanel>
+                </GroupBox>
+
+                <!-- Import Options -->
+                <GroupBox Header="Import Options" Margin="0,0,0,10">
+                    <StackPanel>
+                        <CheckBox Name="chkSafes" Content="Safes" IsChecked="True"/>
+                        <CheckBox Name="chkPlatforms" Content="Platforms" IsChecked="True"/>
+                        <CheckBox Name="chkAccounts" Content="Accounts" IsChecked="True"/>
+                    </StackPanel>
+                </GroupBox>
+
+                <!-- CSV Flow -->
+                <GroupBox Header="CSV Flow">
+                    <StackPanel>
+                        <Button Content="Create sample CSV" Click="CreateSampleCsv_Click" Margin="0,0,0,5"/>
+                        <Button Content="Select CSV" Click="SelectExistingCsv_Click" Margin="0,0,0,5"/>
+                        <Button Content="Encrypt CSV" Click="EncryptSelectedCsv_Click" Margin="0,0,0,5"/>
+                        <Button Content="Run Import" Click="RunImportPCloud_Click"/>
+                    </StackPanel>
+                </GroupBox>
+            </StackPanel>
+
+            <!-- Log Output -->
+            <TextBox Name="txtLog" Grid.Column="1"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     AcceptsReturn="True"
+                     TextWrapping="Wrap"
+                     IsReadOnly="True"/>
+        </Grid>
+    </Grid>
+</Window>

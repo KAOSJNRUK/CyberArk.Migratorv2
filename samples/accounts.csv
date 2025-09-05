@@ -1,0 +1,2 @@
+﻿safe,platform,address,port,username,secret_enc,rotatable,json_meta
+CORP-UNIX,UnixSSH,server01,22,root,REDACTED,true,""{""""owner"""":""""unix-team""""}""

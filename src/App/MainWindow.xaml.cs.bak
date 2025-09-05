@@ -1,0 +1,250 @@
+﻿using System.Text;
+using System.Text.Json;
+using System.Windows;
+using System.Linq;
+
+using System.IO;
+using Microsoft.Win32;
+using CsvHelper;
+using System.Globalization;
+
+using CyberArk.Migrator.Core.Csv;
+using CyberArk.Migrator.Core.Security;
+using CyberArk.Migrator.Core.Models;
+using CyberArk.Migrator.Targets;
+using CyberArk.Migrator.Infra;
+
+namespace CyberArk.Migrator.App
+{
+    public partial class MainWindow : Window
+    {
+        private readonly CryptoService _crypto = new(new DpapiKekProvider());
+        private byte[]? _dekWrapped;
+        private byte[]? _dek;
+
+        private string SamplesDir => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MigratorSamples");
+        private string AccountsCsv => System.IO.Path.Combine(SamplesDir, "accounts.csv");
+        private string AccountsEnc => System.IO.Path.Combine(SamplesDir, "accounts.csv.enc");
+
+        private string? _selectedCsvPath;
+
+        public MainWindow()
+        {
+            InitializeComponent();
+            Directory.CreateDirectory(SamplesDir);
+            Log($"Samples directory: {SamplesDir}");
+        }
+
+        private void Log(string msg) => Dispatcher.Invoke(() =>
+        {
+            txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}{Environment.NewLine}");
+            txtLog.ScrollToEnd();
+        });
+
+        private void CreateSampleCsv_Click(object sender, RoutedEventArgs e)
+        {
+            using var sw = new StreamWriter(AccountsCsv, false, new System.Text.UTF8Encoding(false));
+            sw.WriteLine("safe,platform,address,port,username,secret_enc,rotatable,json_meta");
+            sw.WriteLine("CORP-UNIX,UnixSSH,server01,22,root,REDACTED,true,\"{\"\"owner\"\":\"\"unix-team\"\"}\"");
+            sw.Flush();
+            _selectedCsvPath = AccountsCsv;
+            txtSelectedCsv.Text = $"Selected: {AccountsCsv}";
+            Log($"Sample CSV created: {AccountsCsv}");
+        }
+
+        private void SelectExistingCsv_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Select CSV export",
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
+            };
+            if (dlg.ShowDialog() == true)
+            {
+                _selectedCsvPath = dlg.FileName;
+                txtSelectedCsv.Text = $"Selected: {_selectedCsvPath}";
+                Log($"Selected CSV: {_selectedCsvPath}");
+            }
+        }
+
+        private async void EncryptSelectedCsv_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_selectedCsvPath) || !File.Exists(_selectedCsvPath))
+            {
+                Log("No CSV selected. Create sample or choose an existing CSV first.");
+                return;
+            }
+            var (dek, wrapped) = _crypto.NewDek();
+            _dek = dek;
+            _dekWrapped = wrapped;
+
+            var outPath = _selectedCsvPath + ".enc";
+            await AesGcmFile.EncryptAsync(_selectedCsvPath, outPath, dek, Encoding.UTF8.GetBytes("accounts.csv;v1"));
+            txtEncryptedPath.Text = $"Encrypted: {outPath}";
+            Log($"Encrypted CSV -> {outPath} (DEK wrapped with DPAPI)");
+        }
+
+        private async Task<List<Account>> LoadAccountsFromEncryptedAsync(string encryptedPath)
+        {
+            if (_dekWrapped is null)
+            {
+                Log("No DEK available. Encrypt a CSV to establish the DEK for this session.");
+                return new List<Account>();
+            }
+            if (!File.Exists(encryptedPath))
+            {
+                Log("Encrypted file not found.");
+                return new List<Account>();
+            }
+
+            var dek = _crypto.Unwrap(_dekWrapped);
+            var bytes = await AesGcmFile.DecryptAsync(encryptedPath, dek, Encoding.UTF8.GetBytes("accounts.csv;v1"));
+
+            using var reader = new StreamReader(new MemoryStream(bytes));
+            using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
+            var rows = csv.GetRecords<AccountCsvRow>().ToList();
+
+            var accounts = rows.Select(r => new Account {
+                Safe = r.Safe, Platform = r.Platform, Address = r.Address, Port = r.Port,
+                Username = r.Username, Secret = r.SecretEnc, Rotatable = r.Rotatable,
+                Meta = string.IsNullOrWhiteSpace(r.JsonMeta) ? null :
+                    JsonSerializer.Deserialize<Dictionary<string,string>>(r.JsonMeta)
+            }).ToList();
+
+            return accounts;
+        }
+
+        private int ParseInt(string text, int dflt)
+        {
+            return int.TryParse(text, out var n) && n > 0 ? n : dflt;
+        }
+
+                private async Task RunImportAsync(string targetType)
+        {
+            try
+            {
+                var encrypted = !string.IsNullOrWhiteSpace(txtEncryptedPath.Text) && txtEncryptedPath.Text.StartsWith("Encrypted:")
+                    ? txtEncryptedPath.Text.Replace("Encrypted:", "").Trim()
+                    : (_selectedCsvPath is null ? AccountsEnc : _selectedCsvPath + ".enc");
+
+                Log($"Using encrypted file: {encrypted}");
+
+                var doSafes     = (chkSafes?.IsChecked ?? false) == true;
+                var doPlatforms = (chkPlatforms?.IsChecked ?? false) == true;
+                var doAccounts  = (chkAccounts?.IsChecked ?? false) == true;
+
+                if (!doSafes && !doPlatforms && !doAccounts)
+                {
+                    Log("Nothing selected to import. Enable at least one of: Safes, Platforms, Accounts.");
+                    return;
+                }
+
+                var accounts = await LoadAccountsFromEncryptedAsync(encrypted);
+                if (accounts.Count == 0 && !doSafes && !doPlatforms)
+                {
+                    Log("No accounts loaded, nothing to do.");
+                    return;
+                }
+
+                var batchSize = ParseInt(txtBatchSize.Text, 50);
+                var dop = ParseInt(txtDop.Text, 4);
+
+                var safes = accounts.Select(a => new Safe { Name = a.Safe }).DistinctBy(s => s.Name);
+                var plats = accounts.Select(a => new Platform { Name = a.Platform, Technology = "UNKNOWN" }).DistinctBy(p => p.Name);
+
+                var ct = CancellationToken.None;
+
+                if (targetType == "PCloud")
+                {
+                    var target = new PCloudTarget();
+                    await target.AuthenticateAsync(ct);
+
+                    if (doSafes)     await target.EnsureSafesAsync(safes, ct);
+                    if (doPlatforms) await target.EnsurePlatformsAsync(plats, ct);
+                    if (doAccounts)  await ImportOrchestrator.RunBatchedParallelAsync(target, accounts, batchSize, dop, ct);
+                }
+                else
+                {
+                    var target = new SelfHostedTarget();
+                    await target.AuthenticateAsync(ct);
+
+                    if (doSafes)     await target.EnsureSafesAsync(safes, ct);
+                    if (doPlatforms) await target.EnsurePlatformsAsync(plats, ct);
+                    if (doAccounts)  await ImportOrchestrator.RunBatchedParallelAsync(target, accounts, batchSize, dop, ct);
+                }
+
+                Log($"Done. Safes={doSafes}, Platforms={doPlatforms}, Accounts={doAccounts}. Accounts processed: {accounts.Count} (batchSize={batchSize}, DoP={dop})");
+            }
+            catch (Exception ex)
+            {
+                Log($"ERROR: {ex.Message}");
+            }
+        }
+
+        var accounts = await LoadAccountsFromEncryptedAsync(encrypted);
+        if (accounts.Count == 0)
+        {
+            Log("No accounts loaded from encrypted file.");
+            // If only safes/platforms are selected, we can still proceed using inferred uniques from accounts would be empty.
+            if (!doSafes && !doPlatforms)
+                return;
+        }
+
+        var batchSize = ParseInt(txtBatchSize.Text, 50);
+        var dop = ParseInt(txtDop.Text, 4);
+
+        var safes = accounts.Select(a => new Safe { Name = a.Safe }).DistinctBy(s => s.Name);
+        var plats = accounts.Select(a => new Platform { Name = a.Platform, Technology = "UNKNOWN" }).DistinctBy(p => p.Name);
+
+        var ct = CancellationToken.None;
+
+        if (targetType == "PCloud")
+        {
+            var target = new PCloudTarget();
+            await target.AuthenticateAsync(ct);
+
+            if (doSafes)     await target.EnsureSafesAsync(safes, ct);
+            if (doPlatforms) await target.EnsurePlatformsAsync(plats, ct);
+            if (doAccounts)  await ImportOrchestrator.RunBatchedParallelAsync(target, accounts, batchSize, dop, ct);
+        }
+        else
+        {
+            var target = new SelfHostedTarget();
+            await target.AuthenticateAsync(ct);
+
+            if (doSafes)     await target.EnsureSafesAsync(safes, ct);
+            if (doPlatforms) await target.EnsurePlatformsAsync(plats, ct);
+            if (doAccounts)  await ImportOrchestrator.RunBatchedParallelAsync(target, accounts, batchSize, dop, ct);
+        }
+
+        Log($"Done. Selected operations: Safes={doSafes}, Platforms={doPlatforms}, Accounts={doAccounts}. Accounts processed: {accounts.Count} (batchSize={batchSize}, DoP={dop})");
+    }
+    catch (Exception ex)
+    {
+        Log($"ERROR: {ex.Message}");
+    }
+}
+                else
+                {
+                    var target = new SelfHostedTarget();
+                    await target.AuthenticateAsync(ct);
+                    await target.EnsureSafesAsync(safes, ct);
+                    await target.EnsurePlatformsAsync(plats, ct);
+                    await ImportOrchestrator.RunBatchedParallelAsync(target, accounts, batchSize, dop, ct);
+                }
+
+                Log($"Import finished. Accounts processed: {accounts.Count} (batchSize={batchSize}, DoP={dop})");
+            }
+            catch (Exception ex)
+            {
+                Log($"ERROR: {ex.Message}");
+            }
+        }
+
+        private async void RunImportPCloud_Click(object sender, RoutedEventArgs e) => await RunImportAsync("PCloud");
+        private async void RunImportSelfHosted_Click(object sender, RoutedEventArgs e) => await RunImportAsync("SelfHosted");
+    }
+}
+
+
+
